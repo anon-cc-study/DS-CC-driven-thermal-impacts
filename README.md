@@ -71,7 +71,7 @@ The specific versions tested in this analysis are listed below.
     pip install -r requirements.txt
     ```
 
-**Typical Install Time:** Approximately ** 60 minutes** on a "normal" desktop computer.
+**Typical Install Time:** Approximately 60 minutes on a "normal" desktop computer.
 
 ## 3. Demo
 We provide a small dataset to verify the functionality of the software.
@@ -105,29 +105,29 @@ Before running any notebooks, update these configuration files to point to your 
 
 Folder: machine_learning_demand_forecasting/
 
-This module handles data preparation, feature engineering, machine-learning-based demand forecasting, and spatial disaggregation from feeder-level to building-level demand.
+This module handles data preparation, machine-learning-based (MLP) demand forecasting, and spatial disaggregation of predictions from feeder-level to building-level demand.
 
 Run the following notebooks in order:
 
-1. DP Prepare input data for ML ResStock...ipynb
+1. DATA PROCESSING Prepare input data for training (resstock load and weather).ipynb
 Preprocesses ResStock and weather data for model training.
 
-2. DP Prepare input data for ML TGW...ipynb
+2. DATA PROCESSING Prepare input data for prediction- TGW weather.ipynb
 Prepares climate-scenario (TGW) inputs for downstream prediction.
 
-3. DP Create resstock dataframes.ipynb
+3. DATA PROCESSING Create resstock dataframes.ipynb
 Constructs structured resstock datasets.
 
-4. DP Prepare ResStock inputs for feeder disaggregation.ipynb
+4. DATA PROCESSING Create cooling heating and non-CH data for dissaggregation process.ipynb
 Prepares building-to-feeder mapping inputs for later disaggregation.
 
-5. TRAIN load prediction model.ipynb
+5. TRAIN electricity demand prediction model.ipynb
 Trains the machine learning electricity demand forecasting model.
 
-6. PREDICT load with TGW.ipynb
+6. PREDICT electricity demand with climate data.ipynb
 Generates electricity demand predictions under different climate scenarios.
 
-7. POST DP Disaggregate feeder to buildings.ipynb
+7. POST DATA PROCESSING Disaggregate feeder to buildings.ipynb
 Disaggregates feeder-level demand predictions to individual buildings.
 
 ### Module 2: Thermal Models and Power Flow
@@ -135,12 +135,12 @@ Folder: thermal_models_and_power_flow/
 
 This module constructs weather-dependent thermal inputs and runs power flow simulations on distribution networks using OpenDSS.
 
-Run the following notebooks in order:
+Run the following notebooks in order:    
 
-1. DP2 create weather-dependent smartds files (at peak demand timestep).ipynb
+1. DATA PROCESSING create weather-dependent smartds files.ipynb
 Generates weather-adjusted distribution network inputs at each timestep (hourly resolution).
 
-2. PF5 multiple snapshot PF - screening only critical timesteps.ipynb
+2. POWER FLOW multiple snapshot PF - derating and MLP demand growth.ipynb
 Runs power flow simulations and screens for thermally critical timesteps.
 
 ### Code Availability and Support
