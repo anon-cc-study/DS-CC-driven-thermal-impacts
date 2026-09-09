@@ -1,6 +1,22 @@
 # --- TGW parameters ---
+# Demo run:
 TGW_weather_years: ['2018'] # Select weather year, e.g., 2018,  2058
 TGW_scenario: 'historical' # Select emissions scenario: historical (for TGW_weather_year < 2020) | rcp45cooler | rcp45hotter | rcp85cooler  | rcp85hotter
+
+# Demo run:
+TGW_years_scenarios_ranges:
+  - start_year: 2018
+    end_year: 2018
+    scenarios: ["historical"]
+
+# # full range of weather scenarios 
+# TGW_years_scenarios_ranges:
+#   - start_year: 1990
+#     end_year: 2019
+#     scenarios: ["historical"]
+#   - start_year: 2030
+#     end_year: 2059
+#     scenarios: ["rcp45hotter"]  
 
 # --- SMART-DS parameters ---
 CITY_REGIONS_TO_RUN:

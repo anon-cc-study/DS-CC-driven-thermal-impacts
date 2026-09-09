@@ -100,7 +100,6 @@ def find_results_joblib_files_df(directory, N):
     return df, full_paths
 
 
-
 def get_parquet_load_data(parquet_folder_path, load_model,start_month,end_month):
     file_prefix = load_model.split('_')[0] 
     parquet_file_path = os.path.join(parquet_folder_path, load_model)
@@ -254,7 +253,17 @@ def aggregate_parquet_data(parquet_data_path, loads_dss_path, file_prefix, aggre
     dont_sum_columns = [df.columns[0], df.columns[2], df.columns[3]]
     sum_columns = [col for col in df.columns if col not in dont_sum_columns]
     df_final = df[dont_sum_columns]
-    df_sums = df[sum_columns]
+    #  Weight the first parquet file by the number of times this building appears in Loads.dss
+    if aggregation_level == "feeder":
+        first_parquet_building_id = parquet_files[0].replace(".parquet", "")
+        matching_row = df_building_id_count[
+            df_building_id_count["building_id"] == first_parquet_building_id
+        ]
+        first_building_count = int(matching_row["count"].values[0]) if not matching_row.empty else 0
+    else:
+        first_building_count = 1
+
+    df_sums = df[sum_columns] * first_building_count
     
     # Aggregate sum_columns (Electricity consumption variables) from parquet_files
     for file in parquet_files[1:]:
@@ -326,7 +335,7 @@ def import_resstock_weather_data(weather_data_path, start_month, end_month):
     
     return weather_df
 
-def import_TGW_weather_data(weather_data_path,TGW_weather_year, TGW_location, start_month, end_month):
+def import_TGW_weather_data_civil_time(weather_data_path,TGW_weather_year, TGW_location, start_month, end_month):
     """
     Reads csv TGW weather data files from a folder and processes it (converts index numbers to datetime)
     :param start_month: Start month for filtering (inclusive)
@@ -396,6 +405,103 @@ def import_TGW_weather_data(weather_data_path,TGW_weather_year, TGW_location, st
     weather_df = weather_df[new_order] # Reorder DataFrame
        
     weather_df = weather_df[(weather_df['month'] >= start_month) & (weather_df['month'] <= end_month)] # Filter data to only include rows within the specified month range
+
+    return weather_df
+
+
+def import_TGW_weather_data_standard_time(weather_data_path, TGW_weather_year, TGW_location, start_month, end_month):
+    """
+    Reads TGW weather CSV and converts it to a processed weather DataFrame.
+
+    Time convention:
+    - Assumes raw TGW rows are ordered as hourly UTC-like data starting Jan 1 00:00.
+    - Converts values to fixed local standard time using a fixed UTC offset.
+    - Does not apply daylight saving time.
+    - This treats historical and future years consistently and preserves 8760 hours.
+    """
+
+    weather_df = pd.read_csv(weather_data_path)
+
+    ### Rename columns to match training dataframe ###
+    weather_df.rename(columns={weather_df.columns[0]: "Index"}, inplace=True)
+    weather_df.rename(columns={weather_df.columns[1]: "Relative Humidity [%]"}, inplace=True)
+    weather_df.rename(columns={weather_df.columns[2]: "Dry Bulb Temperature [°C]"}, inplace=True)
+    weather_df.rename(columns={weather_df.columns[3]: "Global Horizontal Radiation [W/m2]"}, inplace=True)
+    weather_df.rename(columns={weather_df.columns[4]: "Wind Speed [m/s]"}, inplace=True)
+    weather_df.rename(columns={weather_df.columns[5]: "Wind Direction [Deg]"}, inplace=True)
+
+    # Convert temperature from Kelvin to Celsius
+    weather_df["Dry Bulb Temperature [°C]"] = (
+        weather_df["Dry Bulb Temperature [°C]"] - 273.15
+    )
+
+    weather_df = weather_df.drop("Index", axis=1)
+
+    ### Convert from UTC-like row order to fixed local standard time ###
+
+    standard_utc_offsets = {
+        "Greensboro": -5,      # Eastern Standard Time
+        "Austin": -6,          # Central Standard Time
+        "SanFrancisco": -8,    # Pacific Standard Time
+        "Concord": -8,         # Pacific Standard Time
+    }
+
+    if TGW_location not in standard_utc_offsets:
+        raise ValueError(
+            f"Unknown TGW_location={TGW_location}. "
+            f"Available locations: {list(standard_utc_offsets.keys())}"
+        )
+
+    utc_offset_hours = standard_utc_offsets[TGW_location]
+
+    # Shift all weather variables by the fixed local-standard-time offset.
+    weather_cols = weather_df.columns.tolist()
+
+    weather_df_shifted = weather_df.copy()
+    weather_df_shifted[weather_cols] = np.roll(
+        weather_df[weather_cols].to_numpy(),
+        utc_offset_hours,
+        axis=0
+    )
+
+    weather_df = weather_df_shifted
+
+    # Create local-standard-time datetime index.
+    weather_df["date_time"] = pd.date_range(
+        start=f"{TGW_weather_year}-01-01 00:00:00",
+        periods=len(weather_df),
+        freq="h"
+    )
+
+    ### Add useful time numerical features ###
+    weather_df["year"] = weather_df["date_time"].dt.year
+    weather_df["month"] = weather_df["date_time"].dt.month
+    weather_df["day"] = weather_df["date_time"].dt.day
+    weather_df["hour"] = weather_df["date_time"].dt.hour
+    weather_df["weekday"] = weather_df["date_time"].dt.weekday
+    weather_df["weekend"] = (weather_df["weekday"] >= 5).astype(int)
+
+    weather_df = weather_df.reset_index(drop=True)
+
+    # Put time columns first
+    cols_to_move = [
+        "date_time", "year", "month", "day", "hour", "weekday", "weekend"
+    ]
+
+    remaining_cols = [
+        col for col in weather_df.columns
+        if col not in cols_to_move
+    ]
+
+    weather_df = weather_df[cols_to_move + remaining_cols]
+
+    # Filter months
+    weather_df = weather_df[
+        (weather_df["month"] >= start_month) &
+        (weather_df["month"] <= end_month)
+    ].copy()
+
+    weather_df = weather_df.reset_index(drop=True)
 
     return weather_df
 
