@@ -43,16 +43,25 @@ def modify_master_file(new_master_file_path, solution_mode, demand_mode, line_ra
         loads_path = os.path.join('predicted_loads','TGW', TGW_scenario, TGW_weather_year, f'Loads_{m}_{d}_{h}.dss')
         linecodes_path = os.path.join('predicted_linecodes', line_rating_mode, TGW_scenario, TGW_weather_year, f'LineCodes_{m}_{d}_{h}.dss')      
         transformer_path = os.path.join('predicted_transformers', transformers_rating_mode, TGW_scenario, TGW_weather_year, f'Transformers_{m}_{d}_{h}.dss')
+        pvsystems_path = os.path.join('predicted_pvsystems','TGW',TGW_scenario,TGW_weather_year, f'PVSystems_{m}_{d}_{h}.dss')
     else:
         loads_path = os.path.join('predicted_loads','TGW', TGW_scenario, TGW_weather_year, 'Loads.dss')
         linecodes_path = os.path.join('predicted_linecodes', line_rating_mode, TGW_scenario, TGW_weather_year, 'LineCodes.dss')      
         transformer_path = os.path.join('predicted_transformers', transformers_rating_mode, TGW_scenario, TGW_weather_year, 'Transformers.dss')
+        pvsystems_path = os.path.join('predicted_pvsystems','TGW',TGW_scenario,TGW_weather_year,'PVSystems.dss')
+
 
     if solution_mode == 'snapshot':
         match demand_mode:
             case 'MLP':
                 # modified_content = modified_content.replace('Loads.dss', loads_path)     # Replace all occurrences of "Loads.dss" with new path to predicted "Loads.dss"
                 modified_content = re.sub(r"(\d+[\\/]+)Loads\.dss", r"\1" + loads_path, modified_content) # Replace all occurrences of "<number>/Loads.dss" with new path to predicted "Loads.dss" (we're adding number so that subtransmission/Loads.dss is skipped, since that single load does not have a prediction model)
+                modified_content = re.sub(
+                    r"(\d+[\\/]+)PVSystems\.dss",
+                    r"\1" + pvsystems_path,
+                    modified_content,
+                    flags=re.IGNORECASE,
+                )
                 modified_content = modified_content.replace('LineCodes.dss', linecodes_path)     
                 modified_content = modified_content.replace('Transformers.dss', transformer_path)    
                 modified_content = modified_content.replace('Redirect ', 'Redirect ../../../')     # Replace all occurrences of Redirect to match the relative location of the mdh master files with the new TGE locations
@@ -67,6 +76,12 @@ def modify_master_file(new_master_file_path, solution_mode, demand_mode, line_ra
             case 'MLP':
                 # modified_content = modified_content.replace('Loads.dss', loads_path)     # Replace all occurrences of "Loads.dss" with "Loads.dss"
                 modified_content = re.sub(r"\d+/Loads\.dss",loads_path,modified_content) # Replace all occurrences of "<number>/Loads.dss" with new path to predicted "Loads.dss" (we're adding number so that subtransmission/Loads.dss is skipped, since that single load does not have a prediction model)
+                modified_content = re.sub(
+                    r"(\d+[\\/]+)PVSystems\.dss",
+                    r"\1" + pvsystems_path,
+                    modified_content,
+                    flags=re.IGNORECASE,
+                )
                 modified_content = modified_content.replace('LoadShapes.dss', f"{loadshapes_path}")    
                 modified_content = modified_content.replace('LineCodes.dss', linecodes_path)    
                 modified_content = modified_content.replace('Transformers.dss', transformer_path)   
@@ -304,7 +319,299 @@ def update_loads_file(loads_file_path, building_multipliers):
 #                 print(f"New line:{line}")
             outfile.write(line)
     
+
     
+def extract_pvsystems_information(
+    dict_bus_coord,
+    weather_year,
+    m,
+    d,
+    h,
+    row_i,
+    decimals=6,
+    extraction_mode="minimal",
+    enable_low_memory=True,
+):
+    """
+    Extract PVSystem information from the active OpenDSS circuit.
+
+    """
+
+    valid_extraction_modes = {"minimal", "full"}
+    if extraction_mode not in valid_extraction_modes:
+        raise ValueError(
+            f"extraction_mode must be one of {valid_extraction_modes}, "
+            f"got {extraction_mode!r}"
+        )
+
+    def _round_or_none(x, ndigits=decimals):
+        try:
+            if x is None:
+                return None
+            if isinstance(x, (int, float, np.integer, np.floating)):
+                if np.isnan(x):
+                    return None
+                return round(float(x), ndigits)
+            return x
+        except Exception:
+            return x
+
+    def _safe_prop(prop_name, default=None):
+        """
+        Safely get an OpenDSS property from the active element.
+        Returns strings because OpenDSS properties are stored as text.
+        """
+        try:
+            dss.Properties.Name(prop_name)
+            value = dss.Properties.Value()
+            if value == "":
+                return default
+            return value
+        except Exception:
+            return default
+
+    def _safe_float_prop(prop_name, default=None):
+        value = _safe_prop(prop_name, default=default)
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except Exception:
+            return default
+
+    def _terminal_power_from_powers(powers, num_phases, terminal=1):
+        """
+        Compute total P, Q, and S for one terminal.
+
+        OpenDSS CktElement.Powers() returns:
+            [P1, Q1, P2, Q2, ...]
+
+        ordered by conductors/terminals.
+        """
+        if powers is None or len(powers) == 0 or num_phases <= 0:
+            return None, None, None
+
+        start_idx = 2 * num_phases * (terminal - 1)
+        end_idx = start_idx + 2 * num_phases
+
+        if len(powers) < end_idx:
+            end_idx = min(len(powers), end_idx)
+
+        p_kw = 0.0
+        q_kvar = 0.0
+
+        for idx in range(start_idx, end_idx, 2):
+            if idx + 1 < len(powers):
+                p_kw += powers[idx]
+                q_kvar += powers[idx + 1]
+
+        s_kva = abs(complex(p_kw, q_kvar))
+        return p_kw, q_kvar, s_kva
+
+    # Some SMART-DS base_timeseries folders may have no PVSystem objects.
+    try:
+        pvsystem_names = dss.PVsystems.AllNames()
+    except Exception:
+        pvsystem_names = []
+
+    if not pvsystem_names:
+        return pd.DataFrame()
+
+    pv_data = []
+    default_coordinates = (0, 0)
+
+    for pv_name in pvsystem_names:
+        try:
+            dss.PVsystems.Name(pv_name)
+            dss.Circuit.SetActiveElement(f"PVSystem.{pv_name}")
+        except Exception as e:
+            print(
+                f"Warning: skipping PVSystem {pv_name} because it could not be "
+                f"activated. Details: {e}"
+            )
+            continue
+
+        # -----------------------------
+        # Bus / coordinate information
+        # -----------------------------
+        try:
+            bus_names = dss.CktElement.BusNames()
+        except Exception:
+            bus_names = []
+
+        bus_full = bus_names[0] if len(bus_names) > 0 else None
+        bus_name = bus_full.split(".")[0] if bus_full is not None else None
+
+        coordinates = dict_bus_coord.get(bus_name, None) if bus_name is not None else None
+
+        if coordinates is None:
+            if bus_name is not None:
+                print(
+                    f"Bus {bus_name} was not found in Buscoords.dss, "
+                    f"so PVSystem {pv_name} was assigned the previous/default coordinates"
+                )
+            coordinates = default_coordinates
+        else:
+            default_coordinates = coordinates
+
+        # -----------------------------
+        # Basic circuit properties
+        # -----------------------------
+        try:
+            num_phases = dss.CktElement.NumPhases()
+        except Exception:
+            num_phases = None
+
+        try:
+            powers = dss.CktElement.Powers()
+        except Exception:
+            powers = []
+
+        p_kw_terminal1, q_kvar_terminal1, s_kva_terminal1 = _terminal_power_from_powers(
+            powers=powers,
+            num_phases=num_phases if num_phases is not None else 0,
+            terminal=1,
+        )
+
+        # -----------------------------
+        # Static or quasi-static PVSystem properties
+        # -----------------------------
+        kv = _safe_float_prop("kv")
+        kva = _safe_float_prop("kVA")
+        pmpp = _safe_float_prop("Pmpp")
+        irradiance = _safe_float_prop("irradiance")
+        pf = _safe_float_prop("pf")
+
+        # -----------------------------
+        # Minimal output
+        # -----------------------------
+        row = {
+            "Weather year": weather_year,
+            "month": m,
+            "day": d,
+            "hour": h,
+            "row_i": row_i,
+
+            "PVSystem": pv_name,
+            "Bus": bus_name,
+            "Lat": _round_or_none(coordinates[1]),
+            "Long": _round_or_none(coordinates[0]),
+            "Num phases": num_phases,
+
+            "kV rating [kV]": _round_or_none(kv),
+            "kVA rating [kVA]": _round_or_none(kva),
+            "Pmpp [kW]": _round_or_none(pmpp),
+            "Irradiance [pu]": _round_or_none(irradiance),
+            "PF": _round_or_none(pf),
+
+            "P terminal 1 [kW]": _round_or_none(p_kw_terminal1),
+            "Q terminal 1 [kvar]": _round_or_none(q_kvar_terminal1),
+            "S terminal 1 [kVA]": _round_or_none(s_kva_terminal1),
+        }
+
+        # -----------------------------
+        # Full output: extra diagnostics
+        # -----------------------------
+        if extraction_mode == "full":
+            pct_pmpp = _safe_float_prop("%Pmpp")
+            pct_cut_in = _safe_float_prop("%Cutin")
+            pct_cut_out = _safe_float_prop("%Cutout")
+
+            try:
+                currents_mag_ang = dss.CktElement.CurrentsMagAng()
+                current_magnitudes = currents_mag_ang[::2]
+                max_current_a = (
+                    max(current_magnitudes) if len(current_magnitudes) > 0 else None
+                )
+            except Exception:
+                current_magnitudes = []
+                max_current_a = None
+
+            try:
+                voltages_mag_ang = dss.CktElement.VoltagesMagAng()
+                voltage_magnitudes_v = voltages_mag_ang[::2]
+                max_voltage_v = (
+                    max(voltage_magnitudes_v) if len(voltage_magnitudes_v) > 0 else None
+                )
+                min_voltage_v = (
+                    min(voltage_magnitudes_v) if len(voltage_magnitudes_v) > 0 else None
+                )
+            except Exception:
+                voltage_magnitudes_v = []
+                max_voltage_v = None
+                min_voltage_v = None
+
+            try:
+                losses_w, losses_var = dss.CktElement.Losses()
+                losses_kw = losses_w / 1000
+                losses_kvar = losses_var / 1000
+            except Exception:
+                losses_kw = None
+                losses_kvar = None
+
+            row.update({
+                "Bus full": bus_full,
+
+                "%Pmpp": _round_or_none(pct_pmpp),
+                "%Cutin": _round_or_none(pct_cut_in),
+                "%Cutout": _round_or_none(pct_cut_out),
+                "daily": _safe_prop("daily"),
+                "yearly": _safe_prop("yearly"),
+                "duty": _safe_prop("duty"),
+                "EffCurve": _safe_prop("EffCurve"),
+                "P-TCurve": _safe_prop("P-TCurve"),
+
+                "Losses [kW]": _round_or_none(losses_kw),
+                "Losses [kvar]": _round_or_none(losses_kvar),
+                "Max current [A]": _round_or_none(max_current_a),
+                "Min voltage [V]": _round_or_none(min_voltage_v),
+                "Max voltage [V]": _round_or_none(max_voltage_v),
+
+                "Voltage magnitudes [V]": [
+                    _round_or_none(v) for v in voltage_magnitudes_v
+                ],
+                "Current magnitudes [A]": [
+                    _round_or_none(i) for i in current_magnitudes
+                ],
+            })
+
+        pv_data.append(row)
+
+    df = pd.DataFrame(pv_data)
+
+    if enable_low_memory:
+        dtype_map = {
+            "month": "uint8",
+            "day": "uint8",
+            "hour": "uint8",
+            "Lat": "float32",
+            "Long": "float32",
+            "Num phases": "Int32",
+            "kV rating [kV]": "float32",
+            "kVA rating [kVA]": "float32",
+            "Pmpp [kW]": "float32",
+            "Irradiance [pu]": "float32",
+            "PF": "float32",
+            "P terminal 1 [kW]": "float32",
+            "Q terminal 1 [kvar]": "float32",
+            "S terminal 1 [kVA]": "float32",
+        }
+
+        if extraction_mode == "full":
+            dtype_map.update({
+                "%Pmpp": "float32",
+                "%Cutin": "float32",
+                "%Cutout": "float32",
+                "Losses [kW]": "float32",
+                "Losses [kvar]": "float32",
+                "Max current [A]": "float32",
+                "Min voltage [V]": "float32",
+                "Max voltage [V]": "float32",
+            })
+
+        df = df.astype(dtype_map)
+
+    return df
     
 def update_loadsShapes_file(new_loadsShapes_file, climate_scenario, TGW_city, weather_year):
     """
@@ -330,7 +637,7 @@ def update_loadsShapes_file(new_loadsShapes_file, climate_scenario, TGW_city, we
 # Function extract_line_information() extracts line information from activated circuit
 # Input: Dictionary of busses and coordinates (+ an opendss circuit should be activated beforehand) and weather year
 # Output: a dataframe with information of all lines in the activated circuit 
-def extract_line_information(dict_bus_coord, weather_year,m,d,h,row_i):
+def extract_line_information(dict_bus_coord, weather_year,m,d,h,row_i,enable_low_memory=True):
     line_names = dss.Lines.AllNames()
     line_data = []
     for line in line_names:
@@ -395,12 +702,31 @@ def extract_line_information(dict_bus_coord, weather_year,m,d,h,row_i):
             "Voltage [pu]": dss.CktElement.VoltagesMagAng()[0]/(1000*kVBase_tobus),
             "Loading [%]": loading,
         })
-    return pd.DataFrame(line_data)
+
+    df = pd.DataFrame(line_data)
+
+    if enable_low_memory:
+        df = df.astype({
+            "month": "uint8",
+            "day": "uint8",
+            "hour": "uint8",
+            "Length [km]": "float32",
+            "From_Lat": "float32",
+            "To_Lat": "float32",
+            "From_Long": "float32",
+            "To_Long": "float32",
+            "NormAmps [A]": "float32",
+            "Nominal V [kV]": "float32",
+            "Voltage [pu]": "float32",
+            "Loading [%]": "float32",
+        })
+
+    return df
 
 # Function extract_transformer_information() extracts Transformer information from activated circuit 
 # Input:  Dictionary of busses and coordinates (+ an opendss circuit should be activated beforehand) and weather year
 # Output: a dataframe with information of all transformers in the activated circuit 
-def extract_transformer_information(dict_bus_coord, weather_year,m,d,h,row_i):
+def extract_transformer_information(dict_bus_coord, weather_year,m,d,h,row_i,enable_low_memory=True):
     transformer_names = dss.Transformers.AllNames()
     transformer_data = []
     default_coordinates = (0, 0)
@@ -475,7 +801,22 @@ def extract_transformer_information(dict_bus_coord, weather_year,m,d,h,row_i):
             "KV rating [kV]": kV_rating,
             "kVA rating [kVA]": kVA_rating,
             "Loading [%]": loading_percent,
-#             "Losses [kW]": losses_kW,
             "Voltages [kV]": voltages_kV,
         })
-    return pd.DataFrame(transformer_data)
+
+    df = pd.DataFrame(transformer_data)
+
+    if enable_low_memory:
+        df = df.astype({
+            "month": "uint8",
+            "day": "uint8",
+            "hour": "uint8",
+            "Lat": "float32",
+            "Long": "float32",
+            "Num windings": "uint8",
+            "Num phases": "uint8",
+            "kVA rating [kVA]": "float32",
+            "Loading [%]": "float32",
+        })
+
+    return df

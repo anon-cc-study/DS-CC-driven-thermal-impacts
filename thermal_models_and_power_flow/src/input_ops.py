@@ -3,8 +3,11 @@ import os
 import datetime
 import re
 import yaml
+import joblib
 from collections import Counter
 from typing import List
+
+from src import df_ops
 
 # Load YAML configuration
 def load_config(config_path):
@@ -27,6 +30,304 @@ def load_config(config_path):
     config["output_pf_path"] = f"main_folder/OpenDSS/results/data/network_performance/{config['demand_mode']}/{config['solution_mode']}/{config['smart_ds_years'][0]}/" # /city/region/climate_scenario/year/time_mode(e.g., regional_peak,99p,100p)
     
     return config
+
+def expand_TGW_years_scenarios(config):
+    """
+    Return TGW_years_scenarios as:
+        {
+            "1990": ["historical"],
+            ...
+            "2059": ["rcp45hotter"]
+        }
+
+    Supports either:
+      1. TGW_years_scenarios_ranges
+      2. existing TGW_years_scenarios
+    """
+    if "TGW_years_scenarios_ranges" in config:
+        TGW_years_scenarios = {}
+
+        for range_spec in config["TGW_years_scenarios_ranges"]:
+            start_year = int(range_spec["start_year"])
+            end_year = int(range_spec["end_year"])
+            scenarios = range_spec["scenarios"]
+
+            for year in range(start_year, end_year + 1):
+                TGW_years_scenarios[str(year)] = scenarios
+
+        return TGW_years_scenarios
+
+    elif "TGW_years_scenarios" in config:
+        return config["TGW_years_scenarios"]
+
+    else:
+        raise KeyError(
+            "Config must contain either 'TGW_years_scenarios_ranges' "
+            "or 'TGW_years_scenarios'."
+        )
+    
+    
+def build_TGW_scenarios_filename_suffix(TGW_years_scenarios):
+    """
+    Build a filename suffix describing the years and scenarios in
+    TGW_years_scenarios.
+
+    Example:
+        {
+            "1990": ["historical"],
+            ...
+            "2019": ["historical"],
+            "2030": ["rcp45hotter"],
+            ...
+            "2059": ["rcp45hotter"],
+        }
+
+    returns:
+        "_1990_2019_historical_2030_2059_rcp45hotter"
+
+    Contiguous year ranges are represented by their starting and ending years.
+    A single year is represented by that year only.
+    """
+
+    # Invert year -> scenarios into scenario -> years.
+    scenario_to_years = {}
+
+    for year, scenarios in TGW_years_scenarios.items():
+        year_int = int(year)
+
+        for scenario in scenarios:
+            scenario_to_years.setdefault(scenario, []).append(year_int)
+
+    suffix_parts = []
+
+    # Sort by earliest year for stable suffix ordering.
+    for scenario, years in sorted(
+        scenario_to_years.items(),
+        key=lambda item: min(item[1]),
+    ):
+        years = sorted(set(years))
+
+        # Detect contiguous year ranges.
+        start_year = years[0]
+        previous_year = years[0]
+
+        for current_year in years[1:] + [None]:
+            if current_year is not None and current_year == previous_year + 1:
+                previous_year = current_year
+                continue
+
+            # Close the current contiguous range.
+            if start_year == previous_year:
+                suffix_parts.append(f"{start_year}_{scenario}")
+            else:
+                suffix_parts.append(
+                    f"{start_year}_{previous_year}_{scenario}"
+                )
+
+            # Start the next range, when present.
+            if current_year is not None:
+                start_year = current_year
+                previous_year = current_year
+
+    return f"{'_'.join(suffix_parts)}" if suffix_parts else ""
+    
+
+
+def build_regional_demand_weather_filename(TGW_years_scenarios):
+    """
+    Build dynamic output filename based on TGW_years_scenarios.
+
+    Example:
+        {
+            "1990": ["historical"],
+            ...
+            "2019": ["historical"],
+            "2030": ["rcp45hotter"],
+            ...
+            "2059": ["rcp45hotter"]
+        }
+
+    becomes:
+        regional_demand_weather_all_cities_1990_2019_historical_2030_2059_rcp45hotter.joblib
+    """
+
+    # Invert year -> scenarios into scenario -> years
+    scenario_to_years = {}
+
+    for year, scenarios in TGW_years_scenarios.items():
+        year_int = int(year)
+
+        for scenario in scenarios:
+            if scenario not in scenario_to_years:
+                scenario_to_years[scenario] = []
+
+            scenario_to_years[scenario].append(year_int)
+
+    filename_parts = ["regional_demand_weather_all_cities"]
+
+    # Sort by earliest year for stable filename ordering
+    for scenario, years in sorted(
+        scenario_to_years.items(),
+        key=lambda item: min(item[1])
+    ):
+        years = sorted(years)
+
+        # Detect contiguous year ranges
+        start_year = years[0]
+        previous_year = years[0]
+
+        for current_year in years[1:] + [None]:
+            if current_year is not None and current_year == previous_year + 1:
+                previous_year = current_year
+            else:
+                # Close current contiguous range
+                end_year = previous_year
+
+                if start_year == end_year:
+                    filename_parts.append(f"{start_year}_{scenario}")
+                else:
+                    filename_parts.append(f"{start_year}_{end_year}_{scenario}")
+
+                # Start next range if there is one
+                if current_year is not None:
+                    start_year = current_year
+                    previous_year = current_year
+
+    filename = "_".join(filename_parts) + ".joblib"
+
+    return filename    
+
+
+
+def load_and_sort_regional_demand(config):
+    """
+    Load dictionary with regional/city aggregated demand/weather/ampacity data,
+    sort by aggregated total buildings demand, and return the sorted dictionary.
+    """
+
+    smart_ds_year = config["smart_ds_years"][0]
+    smart_ds_load_path = config["smart_ds_load_path"] + f"/{smart_ds_year}"
+    
+    TGW_years_scenarios = config['TGW_years_scenarios']
+    regional_demand_weather_filename = build_regional_demand_weather_filename(TGW_years_scenarios)
+    city = "all_cities"
+    regional_demand_weather_path = (
+        smart_ds_load_path
+        + f"/{city}/aggregated_demand/"
+        + regional_demand_weather_filename
+    )
+
+    regional_demand_weather_ampacity_all_cities = joblib.load(regional_demand_weather_path)
+
+    # Sort dictionary by aggregated total demand
+    regional_demand_weather_ampacity_all_cities_sorted = df_ops.sort_nested_dict_dfs(regional_demand_weather_ampacity_all_cities, "aggregated_predicted_buildings_total_kw", ascending=False)
+
+    return regional_demand_weather_ampacity_all_cities_sorted
+
+
+def load_city_weather_inputs(
+    config,
+    city,
+    TGW_scenario,
+    TGW_weather_year,
+    regional_demand_weather_ampacity_all_cities_sorted,
+    smart_ds_year,
+    near_worst_stat,
+    top_n_hours,
+):
+    """
+    Load city-level TGW weather data, near-worst historical temperature,
+    and create the list of top demand mdh values for the city.
+    """
+
+    # Load TGW weather data for TGW location (city)
+    TGW_location = {
+        "GSO": "Greensboro",
+        "AUS": "Austin",
+        "SFO": "SanFrancisco",
+    }.get(city, city)
+
+    TGW_weather_df_save_path = (
+        f"{config['input_data_prediction_path']}/"
+        f"{TGW_location}/{TGW_scenario}/"
+    )
+
+    TGW_weather_df = joblib.load(
+        os.path.join(
+            TGW_weather_df_save_path,
+            f"TGW_weather_{TGW_weather_year}.joblib",
+        )
+    )
+
+    # Load near-worst historical temperature for TGW location (city)
+    # to set default ambient temp of power lines ampacity
+    TGW_stats_dir = (
+        "main_folder/TGW/"
+    )
+
+    loaded_temp_stats = joblib.load(
+        os.path.join(TGW_stats_dir, "temperature_stats.joblib")
+    )
+
+    Ta_near_worst = loaded_temp_stats[TGW_location].loc[
+        (
+            loaded_temp_stats[TGW_location]["scenario"] == "historical"
+        )
+        & (
+            loaded_temp_stats[TGW_location]["year"] == int(smart_ds_year)
+        ),
+        near_worst_stat,
+    ].values[0]
+
+    # Create list of mdh for top % hours
+    df_city = regional_demand_weather_ampacity_all_cities_sorted[
+        (TGW_weather_year, TGW_scenario)
+    ][city]
+
+    list_of_mdh = df_ops.get_top_n_mdh(
+        df_city,
+        top_n_hours,
+        config["start_month_mdh"],
+        config["end_month_mdh"],
+    )
+
+    return {
+        "TGW_location": TGW_location,
+        "TGW_weather_df": TGW_weather_df,
+        "Ta_near_worst": Ta_near_worst,
+        "list_of_mdh": list_of_mdh,
+    }
+    
+
+def build_solar_battery_scenario_folder(solar_share, battery_share):
+    """
+    Build SMART-DS scenario folder name from solar and battery share parameters.
+
+    Examples:
+        solar_share='none', battery_share='none'
+            -> 'base_timeseries'
+
+        solar_share='high', battery_share='low'
+            -> 'solar_high_batteries_low_timeseries'
+    """
+
+    valid_solar_shares = {"none", "low", "medium", "high", "extreme"}
+    valid_battery_shares = {"none", "low", "high"}
+
+    if solar_share not in valid_solar_shares:
+        raise ValueError(
+            f"solar_share must be one of {valid_solar_shares}, got {solar_share!r}"
+        )
+
+    if battery_share not in valid_battery_shares:
+        raise ValueError(
+            f"battery_share must be one of {valid_battery_shares}, got {battery_share!r}"
+        )
+
+    if solar_share == "none" and battery_share == "none":
+        return "base_timeseries"
+
+    return f"solar_{solar_share}_batteries_{battery_share}_timeseries"
 
 def add_feeder_upper_folder(s):
     match = re.match(r"(.*?--)", s)

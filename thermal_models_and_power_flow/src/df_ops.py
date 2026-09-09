@@ -2,81 +2,121 @@ import numpy as np
 import pandas as pd
 
 ## This function gets a dictionary with region-level dataframe data and returns dictionaries with city-level dataframe (all rows from region df combined)
-def concat_regions_to_city(transformers_dict_summary_multi_region, lines_dict_summary_multi_region, TGW_weather_year, TGW_scenario, smart_ds_year):
-    ### Add column 'region' to dataframes
-    for key in transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)]:
-        smart_ds_year, city, region = key
-        transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][key]['region'] = region
+def concat_regions_to_city(
+    transformers_dict_summary_multi_region,
+    lines_dict_summary_multi_region,
+    TGW_weather_year,
+    TGW_scenario,
+    smart_ds_year,
+    CITY_REGIONS_TO_RUN=None,
+):
+    """
+    Concatenate region-level transformer and line summary dataframes into city-level dataframes.
 
-    for key in lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)]:
-        smart_ds_year, city, region = key
-        lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][key]['region'] = region
+    The number of regions per city can vary. For example:
+        CITY_REGIONS_TO_RUN = {
+            "AUS": ["P2U"],
+            "GSO": ["rural", "industrial", "urban-suburban"],
+            "SFO": ["P1U", "P2U"],
+        }
 
-    ### Concatenate regions to single city level dataframes (e.g., a single df with all transformers in GSO)
-    transformers_dict_summary_multi_region_agg_by_city = {}
-    transformers_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)] = {}
+    Parameters
+    ----------
+    transformers_dict_summary_multi_region : dict
+        Nested dictionary:
+        [(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region)] -> dataframe
 
-    lines_dict_summary_multi_region_agg_by_city = {}
-    lines_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)] = {}
+    lines_dict_summary_multi_region : dict
+        Nested dictionary:
+        [(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region)] -> dataframe
 
-    # Greensboro (GSO)
-    city = 'GSO'
-    region1, region2, region3 = 'rural', 'industrial', 'urban-suburban'
-    transformers_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city)] = pd.concat(
-        [
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region1)],
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region2)],
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region3)]
-        ],
-        ignore_index=True
+    TGW_weather_year : str or int
+        TGW weather year.
+
+    TGW_scenario : str
+        TGW scenario, e.g., "historical" or "rcp45hotter".
+
+    smart_ds_year : str or int
+        SMART-DS network year.
+
+    CITY_REGIONS_TO_RUN : dict, optional
+        Dictionary defining which regions to concatenate for each city.
+        If None, the default mapping is used.
+
+    Returns
+    -------
+    transformers_dict_summary_multi_region_agg_by_city : dict
+    lines_dict_summary_multi_region_agg_by_city : dict
+    """
+
+    # Default city-region mapping
+    if CITY_REGIONS_TO_RUN is None:
+        CITY_REGIONS_TO_RUN = {
+            "GSO": ["rural", "industrial", "urban-suburban"],
+            "SFO": ["P1U", "P2U", "P1R"],
+            "AUS": ["P1R", "P1U", "P2U"],
+
+        }
+
+    weather_key = (TGW_weather_year, TGW_scenario)
+
+    transformers_dict_summary_multi_region_agg_by_city = {
+        weather_key: {}
+    }
+
+    lines_dict_summary_multi_region_agg_by_city = {
+        weather_key: {}
+    }
+
+    for city, regions in CITY_REGIONS_TO_RUN.items():
+
+        if len(regions) == 0:
+            raise ValueError(
+                f"CITY_REGIONS_TO_RUN['{city}'] must contain at least one region."
+            )
+
+        transformer_region_dfs = []
+        line_region_dfs = []
+
+        for region in regions:
+            region_key = (smart_ds_year, city, region)
+
+            if region_key not in transformers_dict_summary_multi_region[weather_key]:
+                raise KeyError(
+                    f"Missing transformer data for key: {weather_key} -> {region_key}"
+                )
+
+            if region_key not in lines_dict_summary_multi_region[weather_key]:
+                raise KeyError(
+                    f"Missing line data for key: {weather_key} -> {region_key}"
+                )
+
+            transformer_df = transformers_dict_summary_multi_region[weather_key][region_key].copy()
+            transformer_df["region"] = region
+            transformer_region_dfs.append(transformer_df)
+
+            line_df = lines_dict_summary_multi_region[weather_key][region_key].copy()
+            line_df["region"] = region
+            line_region_dfs.append(line_df)
+
+        transformers_dict_summary_multi_region_agg_by_city[weather_key][
+            (smart_ds_year, city)
+        ] = pd.concat(
+            transformer_region_dfs,
+            ignore_index=True
+        )
+
+        lines_dict_summary_multi_region_agg_by_city[weather_key][
+            (smart_ds_year, city)
+        ] = pd.concat(
+            line_region_dfs,
+            ignore_index=True
+        )
+
+    return (
+        transformers_dict_summary_multi_region_agg_by_city,
+        lines_dict_summary_multi_region_agg_by_city,
     )
-    lines_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city)] = pd.concat(
-        [
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region1)],
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region2)],
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region3)]
-        ],
-        ignore_index=True
-    )
-    # San Francisco (SFO)
-    city = 'SFO'
-    region1, region2, region3 = 'P1R', 'P1U', 'P2U'
-    transformers_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city)] = pd.concat(
-        [
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region1)],
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region2)],
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region3)]
-        ],
-        ignore_index=True
-    )
-    lines_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city)] = pd.concat(
-        [
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region1)],
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region2)],
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region3)]
-        ],
-        ignore_index=True
-    )
-    # Austin (AUS)
-    city = 'AUS'
-    region1, region2, region3 = 'P1R', 'P1U', 'P2U'
-    transformers_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city)] = pd.concat(
-        [
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region1)],
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region2)],
-            transformers_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region3)]
-        ],
-        ignore_index=True
-    )
-    lines_dict_summary_multi_region_agg_by_city[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city)] = pd.concat(
-        [
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region1)],
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region2)],
-            lines_dict_summary_multi_region[(TGW_weather_year, TGW_scenario)][(smart_ds_year, city, region3)]
-        ],
-        ignore_index=True
-    )
-    return transformers_dict_summary_multi_region_agg_by_city, lines_dict_summary_multi_region_agg_by_city
 
 
 ## ---- Define sorting and mdh extraction functions  ---- 
